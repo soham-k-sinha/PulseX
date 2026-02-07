@@ -35,7 +35,7 @@ class EscrowScheduler:
             current_time = ripple_epoch_now()
 
             for batch in locked:
-                if current_time >= batch.finish_after:
+                if current_time >= batch.finish_after + 1:
                     logger.info(f"Batch {batch.batch_id} ready to finish")
                     await self.finish_batch(db, batch)
         finally:
@@ -68,58 +68,76 @@ class EscrowScheduler:
             locked = db.query(OrgEscrow).filter_by(status="locked").all()
             current_time = ripple_epoch_now()
 
+            # Group ready escrows by disaster_id
+            ready_by_disaster: dict[str, list[OrgEscrow]] = {}
             for escrow in locked:
                 if current_time >= escrow.finish_after:
-                    logger.info(f"Org escrow {escrow.id} ready to finish (org {escrow.org_id})")
-                    await self.finish_org_escrow(db, escrow)
+                    ready_by_disaster.setdefault(escrow.disaster_id, []).append(escrow)
+
+            for disaster_id, escrows in ready_by_disaster.items():
+                logger.info(f"Finishing {len(escrows)} org escrows for disaster {disaster_id}")
+                await self.finish_org_escrows_batch(db, disaster_id, escrows)
         finally:
             db.close()
 
-    async def finish_org_escrow(self, db, escrow: OrgEscrow):
+    async def finish_org_escrows_batch(self, db, disaster_id: str, escrows: list[OrgEscrow]):
         try:
-            disaster = db.query(Disaster).filter_by(disaster_id=escrow.disaster_id).first()
+            disaster = db.query(Disaster).filter_by(disaster_id=disaster_id).first()
             if not disaster:
-                logger.error(f"Disaster {escrow.disaster_id} not found")
+                logger.error(f"Disaster {disaster_id} not found")
                 return
 
             disaster_wallet = Wallet.from_seed(decrypt_seed(disaster.wallet_seed_encrypted))
 
-            result = await xrpl_client.finish_escrow(
+            # Build batch params
+            batch_params = []
+            for escrow in escrows:
+                batch_params.append({
+                    "owner": disaster_wallet.address,
+                    "offer_sequence": escrow.sequence,
+                })
+
+            results = await xrpl_client.finish_escrows_batch(
                 wallet=disaster_wallet,
-                owner=disaster_wallet.address,
-                offer_sequence=escrow.sequence,
+                escrow_params=batch_params,
             )
 
-            tx_result = result.get("meta", {})
-            if isinstance(tx_result, dict) and tx_result.get("TransactionResult") == "tesSUCCESS":
-                escrow.status = "finished"
-                escrow.finish_tx_hash = result.get("hash", "")
-                escrow.finished_at = datetime.now(timezone.utc)
+            for escrow, result in zip(escrows, results):
+                if "error" in result:
+                    logger.error(f"Failed to finish org escrow {escrow.id}: {result['error']}")
+                    continue
 
-                org = db.query(Organization).filter_by(org_id=escrow.org_id).first()
-                if org:
-                    org.total_received_drops += escrow.amount_drops
+                tx_result = result.get("meta", {})
+                if isinstance(tx_result, dict) and tx_result.get("TransactionResult") == "tesSUCCESS":
+                    escrow.status = "finished"
+                    escrow.finish_tx_hash = result.get("hash", "")
+                    escrow.finished_at = datetime.now(timezone.utc)
 
+                    org = db.query(Organization).filter_by(org_id=escrow.org_id).first()
+                    if org:
+                        org.total_received_drops += escrow.amount_drops
+
+                    logger.info(
+                        f"Org escrow finished: org {escrow.org_id} received "
+                        f"{from_drops(escrow.amount_drops)} XRP | tx: {result.get('hash', '')}"
+                    )
+                else:
+                    logger.error(f"Org escrow finish failed for {escrow.id}: {result}")
+
+            db.commit()
+
+            # Check if all escrows for this disaster are now finished
+            remaining = db.query(OrgEscrow).filter_by(
+                disaster_id=disaster_id, status="locked"
+            ).count()
+            if remaining == 0:
+                disaster.status = "completed"
+                disaster.completed_at = datetime.now(timezone.utc)
                 db.commit()
-                logger.info(
-                    f"Org escrow finished: org {escrow.org_id} received "
-                    f"{from_drops(escrow.amount_drops)} XRP | tx: {result.get('hash', '')}"
-                )
-
-                # Check if all escrows for this disaster are finished
-                remaining = db.query(OrgEscrow).filter_by(
-                    disaster_id=escrow.disaster_id, status="locked"
-                ).count()
-                if remaining == 0:
-                    disaster.status = "completed"
-                    disaster.completed_at = datetime.now(timezone.utc)
-                    db.commit()
-                    logger.info(f"Disaster {escrow.disaster_id} completed - all escrows finished")
-            else:
-                logger.error(f"Org escrow finish failed: {result}")
+                logger.info(f"Disaster {disaster_id} completed - all escrows finished")
 
         except Exception as e:
-            logger.error(f"Error finishing org escrow {escrow.id}: {e}")
+            logger.error(f"Error finishing org escrows batch for {disaster_id}: {e}")
 
 
 escrow_scheduler = EscrowScheduler()

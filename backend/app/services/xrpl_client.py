@@ -1,6 +1,6 @@
 import logging
 from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.asyncio.transaction import submit_and_wait
+from xrpl.asyncio.transaction import submit_and_wait, autofill
 from xrpl.asyncio.account import get_balance
 from xrpl.asyncio.ledger import get_fee
 from xrpl.models.requests import AccountInfo, AccountObjects, Tx, ServerInfo, SubmitOnly
@@ -116,6 +116,64 @@ class XRPLClient:
                     raise Exception(f"Transaction failed: {engine_result} - {result.get('engine_result_message', '')}")
                 return result
             raise Exception(f"Submit failed: {response.result}")
+
+    async def create_escrows_batch(self, wallet: Wallet, escrow_params: list[dict]) -> list[dict]:
+        """Create multiple escrows using a single WebSocket connection with manual sequence numbering."""
+        results = []
+        async with AsyncWebsocketClient(self.url) as client:
+            # Fetch account sequence once
+            acct_info = await client.request(AccountInfo(account=wallet.address, ledger_index="current"))
+            if not acct_info.is_successful():
+                raise Exception(f"Failed to get account info: {acct_info.result}")
+            base_sequence = acct_info.result["account_data"]["Sequence"]
+
+            for i, params in enumerate(escrow_params):
+                try:
+                    kwargs = {
+                        "account": wallet.address,
+                        "destination": params["destination"],
+                        "amount": str(params["amount_drops"]),
+                        "finish_after": params["finish_after"],
+                        "sequence": base_sequence + i,
+                    }
+                    if params.get("cancel_after"):
+                        kwargs["cancel_after"] = params["cancel_after"]
+                    if params.get("memos"):
+                        kwargs["memos"] = params["memos"]
+
+                    tx = EscrowCreate(**kwargs)
+                    tx_filled = await autofill(tx, client)
+                    response = await submit_and_wait(tx_filled, client, wallet, autofill=False)
+                    results.append(response.result)
+                except Exception as e:
+                    logger.error(f"Batch escrow create #{i} failed: {e}")
+                    results.append({"error": str(e), "index": i})
+        return results
+
+    async def finish_escrows_batch(self, wallet: Wallet, escrow_params: list[dict]) -> list[dict]:
+        """Finish multiple escrows using a single WebSocket connection with manual sequence numbering."""
+        results = []
+        async with AsyncWebsocketClient(self.url) as client:
+            acct_info = await client.request(AccountInfo(account=wallet.address, ledger_index="current"))
+            if not acct_info.is_successful():
+                raise Exception(f"Failed to get account info: {acct_info.result}")
+            base_sequence = acct_info.result["account_data"]["Sequence"]
+
+            for i, params in enumerate(escrow_params):
+                try:
+                    tx = EscrowFinish(
+                        account=wallet.address,
+                        owner=params["owner"],
+                        offer_sequence=params["offer_sequence"],
+                        sequence=base_sequence + i,
+                    )
+                    tx_filled = await autofill(tx, client)
+                    response = await submit_and_wait(tx_filled, client, wallet, autofill=False)
+                    results.append(response.result)
+                except Exception as e:
+                    logger.error(f"Batch escrow finish #{i} failed: {e}")
+                    results.append({"error": str(e), "index": i})
+        return results
 
     async def fund_account(self, address: str) -> bool:
         """Fund an account on devnet via faucet."""

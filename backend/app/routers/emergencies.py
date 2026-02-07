@@ -21,7 +21,7 @@ from app.utils.ripple_time import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/emergencies", tags=["emergencies"])
 
-ESCROW_LOCK_SECONDS = 5  # 5 seconds for testing
+ESCROW_LOCK_SECONDS = 60  # Must exceed batch creation time (~10s per escrow on devnet)
 ESCROW_CANCEL_SECONDS = 86400  # 24 hours
 
 
@@ -41,11 +41,6 @@ async def trigger_emergency(req: TriggerRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cannot read reserve balance: {e}")
 
-    # Keep 10 XRP reserve for account fees
-    available_drops = reserve_balance - to_drops(10)
-    if available_drops <= 0:
-        raise HTTPException(status_code=400, detail="Insufficient reserve balance")
-
     # 2. Get matching organizations
     orgs = db.query(Organization).filter(
         Organization.cause_type.in_(req.affected_causes)
@@ -53,21 +48,56 @@ async def trigger_emergency(req: TriggerRequest, db: Session = Depends(get_db)):
     if not orgs:
         raise HTTPException(status_code=400, detail="No matching organizations found")
 
-    # 3. Calculate allocations
-    allocations = calculate_allocations(orgs, available_drops, req.severity)
+    # 3. Calculate available to send from Reserve (keeping 10 XRP minimum in Reserve)
+    num_orgs = len(orgs)
+    available_to_send = reserve_balance - to_drops(10)  # Reserve must keep 10 XRP minimum
 
-    # 4. Create disaster wallet
+    # Calculate all costs that disaster wallet needs
+    disaster_reserve = to_drops(1.5)       # Disaster wallet base reserve + buffer
+    owner_reserve = num_orgs * to_drops(0.2)  # XRPL owner reserve per escrow object
+    escrow_create_fees = num_orgs * to_drops(0.02)  # Fee per EscrowCreate tx
+    escrow_finish_fees = num_orgs * to_drops(0.02)  # Fee per EscrowFinish tx
+    disaster_buffer = to_drops(0.5)        # Safety margin
+    funding_fee = to_drops(0.02)           # Fee for reserve→disaster payment
+
+    total_overhead = disaster_reserve + owner_reserve + escrow_create_fees + escrow_finish_fees + disaster_buffer + funding_fee
+
+    # What's left after all overhead can go to orgs
+    available_for_allocation = available_to_send - total_overhead
+
+    if available_for_allocation <= 0:
+        min_needed = to_drops(10 + 1.5 + 0.5 + 0.1)  # Reserve min + Disaster min + buffer + fees
+        raise HTTPException(status_code=400, detail=f"Insufficient reserve balance. Need at least {from_drops(min_needed)} XRP in reserve to trigger emergency.")
+
+    logger.info(f"Reserve balance: {from_drops(reserve_balance)} XRP, Available to send: {from_drops(available_to_send)} XRP, Available for allocation: {from_drops(available_for_allocation)} XRP")
+
+    # 4. Calculate allocations from the ACTUAL available amount
+    allocations = calculate_allocations(orgs, available_for_allocation, req.severity)
+
+    # Safety check: Ensure total allocations don't exceed available_for_allocation
+    total_requested = sum(a["amount_drops"] for a in allocations)
+    if total_requested > available_for_allocation:
+        logger.warning(f"Allocations ({from_drops(total_requested)} XRP) exceed available ({from_drops(available_for_allocation)} XRP). Scaling down.")
+        scale_factor = available_for_allocation / total_requested
+        for alloc in allocations:
+            alloc["amount_drops"] = int(alloc["amount_drops"] * scale_factor)
+            alloc["percentage"] = alloc["percentage"] * scale_factor
+
+    # 5. Create disaster wallet
     disaster_wallet = Wallet.create()
     disaster_id = f"disaster_{int(time.time())}"
 
-    # 5. Fund disaster account from reserve (send enough for allocations + fees)
+    # 6. Calculate exact funding needed
     total_allocation = sum(a["amount_drops"] for a in allocations)
-    fund_amount = total_allocation + to_drops(2)  # extra for escrow fees
+    fund_amount = total_allocation + disaster_reserve + owner_reserve + escrow_create_fees + escrow_finish_fees + disaster_buffer
+
+    logger.info(f"Funding disaster wallet: {from_drops(total_allocation)} XRP allocation + {from_drops(disaster_reserve + owner_reserve + escrow_create_fees + escrow_finish_fees + disaster_buffer)} XRP overhead = {from_drops(fund_amount)} XRP total")
 
     try:
-        await xrpl_client.fund_account(disaster_wallet.address)
-    except Exception:
-        pass
+        funded = await xrpl_client.fund_account(disaster_wallet.address)
+        logger.info(f"Faucet funding for disaster wallet: {'success' if funded else 'failed'}")
+    except Exception as e:
+        logger.warning(f"Faucet funding failed (non-critical): {e}")
 
     try:
         fund_result = await xrpl_client.submit_payment(
@@ -93,77 +123,98 @@ async def trigger_emergency(req: TriggerRequest, db: Session = Depends(get_db)):
     db.add(disaster)
     db.commit()
 
-    # 7. Create org escrows
+    # 7. Create org escrows (batched — single WebSocket connection)
     now = int(time.time())
     escrow_results = []
+    successful_escrows = 0
+    failed_escrows = 0
+    actual_allocated_drops = 0
 
+    finish_after = ripple_epoch(now + ESCROW_LOCK_SECONDS)
+    cancel_after = ripple_epoch(now + ESCROW_CANCEL_SECONDS)
+
+    # Build all escrow params up front
+    batch_params = []
     for alloc in allocations:
+        memos = [
+            Memo(
+                memo_type=str_to_hex("allocation"),
+                memo_data=json_to_hex({
+                    "disaster_id": disaster_id,
+                    "org_id": alloc["org_id"],
+                    "disaster_type": req.disaster_type,
+                }),
+            )
+        ]
+        batch_params.append({
+            "destination": alloc["org_address"],
+            "amount_drops": alloc["amount_drops"],
+            "finish_after": finish_after,
+            "cancel_after": cancel_after,
+            "memos": memos,
+        })
+
+    # Single batched call — one connection, sequential sequence numbers
+    batch_results = await xrpl_client.create_escrows_batch(
+        wallet=disaster_wallet,
+        escrow_params=batch_params,
+    )
+
+    # Process results
+    for idx, (alloc, result) in enumerate(zip(allocations, batch_results)):
         org = db.query(Organization).filter_by(org_id=alloc["org_id"]).first()
-        finish_after = ripple_epoch(now + ESCROW_LOCK_SECONDS)
-        cancel_after = ripple_epoch(now + ESCROW_CANCEL_SECONDS)
 
-        try:
-            memos = [
-                Memo(
-                    memo_type=str_to_hex("allocation"),
-                    memo_data=json_to_hex({
-                        "disaster_id": disaster_id,
-                        "org_id": alloc["org_id"],
-                        "disaster_type": req.disaster_type,
-                    }),
-                )
-            ]
-
-            result = await xrpl_client.create_escrow(
-                wallet=disaster_wallet,
-                destination=alloc["org_address"],
-                amount_drops=alloc["amount_drops"],
-                finish_after=finish_after,
-                cancel_after=cancel_after,
-                memos=memos,
-            )
-
-            tx_hash = result.get("hash", "")
-            # Sequence can be in result directly or in tx_json
-            sequence = result.get("Sequence") or result.get("tx_json", {}).get("Sequence", 0)
-
-            org_escrow = OrgEscrow(
-                disaster_id=disaster_id,
-                org_id=alloc["org_id"],
-                org_address=alloc["org_address"],
-                escrow_tx_hash=tx_hash,
-                amount_drops=alloc["amount_drops"],
-                status="locked",
-                finish_after=finish_after,
-                cancel_after=cancel_after,
-                sequence=sequence,
-            )
-            db.add(org_escrow)
-            db.commit()
-
+        if "error" in result:
+            failed_escrows += 1
+            logger.error(f"Failed to create escrow for org {alloc['org_id']} ({org.name if org else 'Unknown'}): {result['error']}")
             escrow_results.append({
                 "org_id": alloc["org_id"],
                 "org_name": org.name if org else "Unknown",
-                "amount_xrp": from_drops(alloc["amount_drops"]),
-                "percentage": alloc["percentage"],
-                "escrow_tx_hash": tx_hash,
-                "finish_after": finish_after,
+                "error": result["error"],
             })
+            continue
 
-            logger.info(f"Created escrow for {org.name if org else alloc['org_id']}: {from_drops(alloc['amount_drops'])} XRP")
+        tx_hash = result.get("hash", "")
+        sequence = result.get("Sequence") or result.get("tx_json", {}).get("Sequence", 0)
 
-        except Exception as e:
-            logger.error(f"Failed to create escrow for org {alloc['org_id']}: {e}")
-            escrow_results.append({
-                "org_id": alloc["org_id"],
-                "org_name": org.name if org else "Unknown",
-                "error": str(e),
-            })
+        org_escrow = OrgEscrow(
+            disaster_id=disaster_id,
+            org_id=alloc["org_id"],
+            org_address=alloc["org_address"],
+            escrow_tx_hash=tx_hash,
+            amount_drops=alloc["amount_drops"],
+            status="locked",
+            finish_after=finish_after,
+            cancel_after=cancel_after,
+            sequence=sequence,
+        )
+        db.add(org_escrow)
+
+        successful_escrows += 1
+        actual_allocated_drops += alloc["amount_drops"]
+        escrow_results.append({
+            "org_id": alloc["org_id"],
+            "org_name": org.name if org else "Unknown",
+            "amount_xrp": from_drops(alloc["amount_drops"]),
+            "percentage": alloc["percentage"],
+            "escrow_tx_hash": tx_hash,
+            "finish_after": finish_after,
+        })
+
+        logger.info(f"Created escrow for {org.name if org else alloc['org_id']}: {from_drops(alloc['amount_drops'])} XRP (tx: {tx_hash})")
+
+    # Update disaster record with actual allocation (not intended)
+    disaster.total_allocated_drops = actual_allocated_drops
+    db.commit()
+
+    logger.info(f"Escrow creation summary: {successful_escrows} successful, {failed_escrows} failed, actual allocated: {from_drops(actual_allocated_drops)} XRP")
+    if failed_escrows > 0:
+        logger.warning(f"{failed_escrows} escrows failed! Some funds may be stuck in disaster wallet.")
 
     return {
         "disaster_id": disaster_id,
         "disaster_account": disaster_wallet.address,
-        "total_allocated_xrp": from_drops(total_allocation),
+        "total_allocated_xrp": from_drops(actual_allocated_drops),
         "allocations": escrow_results,
     }
 

@@ -17,6 +17,7 @@ from app.routers import (
     organizations_router,
     xrpl_router,
 )
+from app.routers.donation_tracking import router as tracking_router
 from app.services.batch_manager import batch_manager
 from app.services.escrow_scheduler import escrow_scheduler
 
@@ -133,6 +134,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(donations_router)
+app.include_router(tracking_router)
 app.include_router(batches_router)
 app.include_router(emergencies_router)
 app.include_router(organizations_router)

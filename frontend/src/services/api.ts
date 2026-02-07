@@ -34,6 +34,9 @@ export const confirmDonation = (tx_hash: string, donor_address: string) =>
 export const getDonorStatus = (address: string) =>
   request<any>(`/donations/status/${address}`)
 
+export const trackDonations = (donor_address: string) =>
+  request<any>(`/donations/track/${donor_address}`)
+
 // Batches
 export const getBatches = () => request<any>('/batches')
 export const getBatchDetail = (batchId: string) => request<any>(`/batches/${batchId}`)
