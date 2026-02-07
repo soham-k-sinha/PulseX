@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version)",
+      "Bash(psql:*)",
+      "Bash(redis-cli ping:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m venv:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(python3:*)",
+      "Bash(npm install:*)",
+      "Bash(lsof:*)",
+      "WebFetch(domain:devnet.xrpl.org)",
+      "WebSearch",
+      "WebFetch(domain:docs.crossmark.io)",
+      "Bash(curl:*)"
+    ]
+  }
+}
