@@ -47,6 +47,7 @@ export const triggerEmergency = (data: {
   location: string
   severity: number
   affected_causes: string[]
+  currency?: string
 }) =>
   request<any>('/emergencies/trigger', {
     method: 'POST',
@@ -63,3 +64,25 @@ export const getOrganizations = () => request<any>('/organizations')
 
 // XRPL
 export const getXRPLStatus = () => request<any>('/xrpl/status')
+
+// RLUSD
+export const prepareDonationRLUSD = (donor_address: string, amount_rlusd: number) =>
+  request<any>('/donations/prepare', {
+    method: 'POST',
+    body: JSON.stringify({ donor_address, amount_rlusd, currency: 'RLUSD' }),
+  })
+
+export const prepareRLUSDTrustline = (address: string) =>
+  request<any>('/rlusd/trustline', {
+    method: 'POST',
+    body: JSON.stringify({ address }),
+  })
+
+export const requestTestRLUSD = (address: string) =>
+  request<any>('/rlusd/faucet', {
+    method: 'POST',
+    body: JSON.stringify({ address }),
+  })
+
+export const getRLUSDBalance = (address: string) =>
+  request<any>(`/rlusd/balance/${address}`)

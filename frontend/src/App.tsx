@@ -45,7 +45,7 @@ function AppContent() {
             <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center text-black">
               <Zap size={16} fill="black" />
             </div>
-            <span className="text-sm font-bold tracking-[0.3em] text-white uppercase">PulseX</span>
+            <span className="text-sm font-bold tracking-[0.3em] text-white uppercase">Pulse X</span>
           </div>
 
           {/* Navigation Tabs — only show when wallet connected */}

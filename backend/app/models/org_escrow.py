@@ -15,6 +15,7 @@ class OrgEscrow(Base):
     escrow_tx_hash = Column(String(128), unique=True, nullable=False)
     finish_tx_hash = Column(String(128), nullable=True)
     amount_drops = Column(BigInteger, nullable=False)
+    currency = Column(String(10), default="XRP", nullable=False)
     status = Column(String(20), default="locked", index=True)
     finish_after = Column(Integer, nullable=False)
     cancel_after = Column(Integer, nullable=True)

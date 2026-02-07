@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from xrpl.models.transactions import Memo
+from xrpl.models.amounts import IssuedCurrencyAmount
 from app.config import settings
 from app.database import SessionLocal
 from app.models.donation import Donation
@@ -35,7 +36,8 @@ class BatchManager:
     async def check_triggers(self):
         db = SessionLocal()
         try:
-            pending = db.query(Donation).filter_by(batch_status="pending").all()
+            # Only batch XRP donations. RLUSD stays in pool for direct emergency distribution.
+            pending = db.query(Donation).filter_by(batch_status="pending", currency="XRP").all()
             if not pending:
                 return
 
@@ -43,24 +45,19 @@ class BatchManager:
             time_since_batch = time.time() - self.last_batch_time
 
             if total_pending_drops >= self.threshold_drops:
-                logger.info(f"Threshold trigger: {from_drops(total_pending_drops)} XRP >= {settings.BATCH_THRESHOLD_XRP} XRP")
-                await self.create_batch(db, pending, "threshold")
+                logger.info(f"Threshold trigger: {from_drops(total_pending_drops)} >= {settings.BATCH_THRESHOLD_XRP}")
+                await self.create_batch(db, pending, "threshold", "XRP")
             elif time_since_batch >= self.time_window and total_pending_drops > 0:
                 logger.info(f"Time trigger: {time_since_batch:.0f}s >= {self.time_window}s")
-                await self.create_batch(db, pending, "time")
+                await self.create_batch(db, pending, "time", "XRP")
         finally:
             db.close()
 
-    async def create_batch(self, db, donations, trigger: str):
+    async def create_batch(self, db, donations, trigger: str, currency: str):
         total_drops = sum(d.amount_drops for d in donations)
-        batch_id = f"batch_{int(time.time())}"
+        batch_id = f"batch_{currency.lower()}_{int(time.time())}"
         now = int(time.time())
         finish_after = ripple_epoch(now + BATCH_ESCROW_LOCK_SECONDS)
-
-        donor_list = [
-            {"addr": d.donor_address, "amt": d.amount_drops, "tx": d.payment_tx_hash}
-            for d in donations
-        ]
 
         memos = [
             Memo(
@@ -68,24 +65,34 @@ class BatchManager:
                 memo_data=json_to_hex({
                     "batch_id": batch_id,
                     "trigger": trigger,
+                    "currency": currency,
                     "donor_count": len(donations),
-                    "total_xrp": from_drops(total_drops),
+                    "total": from_drops(total_drops),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }),
             )
         ]
 
+        # Build the escrow amount based on currency
+        if currency == "RLUSD":
+            escrow_amount = IssuedCurrencyAmount(
+                currency=settings.RLUSD_CURRENCY_HEX,
+                issuer=settings.RLUSD_ISSUER_ADDRESS,
+                value=str(from_drops(total_drops)),
+            )
+        else:
+            escrow_amount = str(total_drops)
+
         try:
             result = await xrpl_client.create_escrow(
                 wallet=xrpl_client.pool_wallet,
                 destination=settings.RESERVE_WALLET_ADDRESS,
-                amount_drops=total_drops,
+                amount_drops=escrow_amount,
                 finish_after=finish_after,
                 memos=memos,
             )
 
             tx_hash = result.get("hash", "")
-            # Sequence can be in result directly or in tx_json
             sequence = result.get("Sequence") or result.get("tx_json", {}).get("Sequence", 0)
 
             batch_escrow = BatchEscrow(
@@ -105,15 +112,15 @@ class BatchManager:
                 d.batch_status = "locked_in_escrow"
 
             db.commit()
-            self.last_batch_time = time.time()
+            self.last_batch_time[currency] = time.time()
 
             logger.info(
-                f"Batch {batch_id} created: {from_drops(total_drops)} XRP "
+                f"Batch {batch_id} created: {from_drops(total_drops)} {currency} "
                 f"from {len(donations)} donors | tx: {tx_hash}"
             )
 
         except Exception as e:
-            logger.error(f"Failed to create batch escrow: {e}")
+            logger.error(f"Failed to create {currency} batch escrow: {e}")
             db.rollback()
 
 

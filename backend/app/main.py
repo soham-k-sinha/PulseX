@@ -16,6 +16,7 @@ from app.routers import (
     emergencies_router,
     organizations_router,
     xrpl_router,
+    rlusd_router,
 )
 from app.routers.donation_tracking import router as tracking_router
 from app.services.batch_manager import batch_manager
@@ -102,6 +103,22 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created")
 
+    # Inline migrations
+    from sqlalchemy import text
+    migrations = [
+        ("donations", "currency", "ALTER TABLE donations ADD COLUMN currency VARCHAR(10) DEFAULT 'XRP' NOT NULL"),
+        ("disasters", "total_rlusd_allocated_drops", "ALTER TABLE disasters ADD COLUMN total_rlusd_allocated_drops BIGINT DEFAULT 0 NOT NULL"),
+        ("org_escrows", "currency", "ALTER TABLE org_escrows ADD COLUMN currency VARCHAR(10) DEFAULT 'XRP' NOT NULL"),
+    ]
+    for table, col, sql in migrations:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(sql))
+                conn.commit()
+                logger.info(f"Added '{col}' column to {table} table")
+        except Exception:
+            pass  # Column already exists
+
     seed_organizations()
 
     # Start background tasks
@@ -139,6 +156,7 @@ app.include_router(batches_router)
 app.include_router(emergencies_router)
 app.include_router(organizations_router)
 app.include_router(xrpl_router)
+app.include_router(rlusd_router)
 
 
 @app.get("/")

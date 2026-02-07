@@ -33,6 +33,7 @@ def track_donations(donor_address: str, db: Session = Depends(get_db)):
         tracking = {
             "donation_id": str(donation.id),
             "amount_xrp": from_drops(donation.amount_drops),
+            "currency": getattr(donation, 'currency', 'XRP'),
             "payment_tx_hash": donation.payment_tx_hash,
             "created_at": donation.created_at.isoformat(),
             "status": donation.batch_status,

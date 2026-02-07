@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Wallet, TrendingUp, ExternalLink, Zap, ShieldCheck, Activity, Database,
-  CheckCircle2, AlertCircle, Loader2, Heart, Building, MapPin
+  CheckCircle2, AlertCircle, Loader2, Heart, Building, MapPin, DollarSign
 } from 'lucide-react'
 import { WalletInfo } from '../services/wallet'
 import { signTransaction } from '../services/wallet'
@@ -17,6 +17,7 @@ interface Props {
 interface TrackedDonation {
   donation_id: string
   amount_xrp: number
+  currency: string
   payment_tx_hash: string
   created_at: string
   status: string
@@ -59,11 +60,17 @@ export default function DonorDashboard({ wallet }: Props) {
   const [donating, setDonating] = useState(false)
   const [trackedDonations, setTrackedDonations] = useState<TrackedDonation[]>([])
   const [totalDonated, setTotalDonated] = useState(0)
+  const [totalRlusdDonated, setTotalRlusdDonated] = useState(0)
   const [poolBalance, setPoolBalance] = useState(0)
   const [threshold, setThreshold] = useState(50)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [selectedDonation, setSelectedDonation] = useState<TrackedDonation | null>(null)
+
+  // RLUSD state
+  const [currency, setCurrency] = useState<'XRP' | 'RLUSD'>('XRP')
+  const [rlusdBalance, setRlusdBalance] = useState(0)
+  const [rlusdLoading, setRlusdLoading] = useState(false)
 
   const loadData = useCallback(async () => {
     try {
@@ -73,7 +80,14 @@ export default function DonorDashboard({ wallet }: Props) {
       ])
 
       setTrackedDonations(tracking.donations || [])
-      setTotalDonated(tracking.donations.reduce((sum: number, d: TrackedDonation) => sum + d.amount_xrp, 0))
+      const xrpTotal = tracking.donations
+        .filter((d: TrackedDonation) => (d.currency || 'XRP') === 'XRP')
+        .reduce((sum: number, d: TrackedDonation) => sum + d.amount_xrp, 0)
+      const rlusdTotal = tracking.donations
+        .filter((d: TrackedDonation) => d.currency === 'RLUSD')
+        .reduce((sum: number, d: TrackedDonation) => sum + d.amount_xrp, 0)
+      setTotalDonated(xrpTotal)
+      setTotalRlusdDonated(rlusdTotal)
       // Show RESERVE balance (the actual emergency fund) instead of pool
       setPoolBalance(xrpl.accounts?.reserve?.balance_xrp || 0)
 
@@ -87,15 +101,60 @@ export default function DonorDashboard({ wallet }: Props) {
     }
   }, [wallet.address])
 
+  const loadRLUSDBalance = useCallback(async () => {
+    try {
+      const res = await api.getRLUSDBalance(wallet.address)
+      setRlusdBalance(res.balance || 0)
+    } catch {
+      // silent
+    }
+  }, [wallet.address])
+
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 10000)
+    loadRLUSDBalance()
+    const interval = setInterval(() => {
+      loadData()
+      loadRLUSDBalance()
+    }, 10000)
     return () => clearInterval(interval)
-  }, [loadData])
+  }, [loadData, loadRLUSDBalance])
+
+  const handleSetupTrustline = async () => {
+    setRlusdLoading(true)
+    setError('')
+    setMessage('')
+    try {
+      const prepared = await api.prepareRLUSDTrustline(wallet.address)
+      const txBlob = await signTransaction(prepared.unsigned_tx)
+      await api.submitSignedTx(txBlob, wallet.address)
+      setMessage('TrustLine set! You can now receive RLUSD.')
+      setTimeout(loadRLUSDBalance, 2000)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setRlusdLoading(false)
+    }
+  }
+
+  const handleGetTestRLUSD = async () => {
+    setRlusdLoading(true)
+    setError('')
+    setMessage('')
+    try {
+      const res = await api.requestTestRLUSD(wallet.address)
+      setMessage(`Received ${res.amount} test RLUSD!`)
+      setTimeout(loadRLUSDBalance, 2000)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setRlusdLoading(false)
+    }
+  }
 
   const handleDonate = async () => {
-    const xrp = parseFloat(amount)
-    if (!xrp || xrp <= 0) {
+    const val = parseFloat(amount)
+    if (!val || val <= 0) {
       setError('Enter a valid amount')
       return
     }
@@ -105,19 +164,23 @@ export default function DonorDashboard({ wallet }: Props) {
     setMessage('')
 
     try {
-      const prepared = await api.prepareDonation(wallet.address, xrp)
+      let prepared
+      if (currency === 'RLUSD') {
+        prepared = await api.prepareDonationRLUSD(wallet.address, val)
+      } else {
+        prepared = await api.prepareDonation(wallet.address, val)
+      }
       const txBlob = await signTransaction(prepared.unsigned_tx)
       const result = await api.submitSignedTx(txBlob, wallet.address)
 
-      setMessage(`Donation confirmed! ${xrp} XRP sent to pool.`)
+      setMessage(`Donation confirmed! ${val} ${currency} sent to pool.`)
       setAmount('')
 
-      // Immediately refresh data
       loadData()
-
-      // Force another refresh after 2 seconds to catch XRPL ledger validation
+      loadRLUSDBalance()
       setTimeout(() => {
         loadData()
+        loadRLUSDBalance()
       }, 2000)
     } catch (err: any) {
       setError(err.message)
@@ -128,6 +191,7 @@ export default function DonorDashboard({ wallet }: Props) {
 
   const getStatusBadge = (donation: TrackedDonation) => {
     const lifecycle = donation.lifecycle
+    const isRlusd = (donation.currency || 'XRP') === 'RLUSD'
 
     if (lifecycle.released_to_orgs) {
       return { label: 'Released to Organizations', color: 'text-emerald-400', icon: CheckCircle2 }
@@ -138,6 +202,10 @@ export default function DonorDashboard({ wallet }: Props) {
     if (lifecycle.allocated_to_disaster) {
       return { label: 'Allocated to Disaster', color: 'text-purple-400', icon: Heart }
     }
+    if (isRlusd) {
+      // RLUSD skips batching — sits in pool ready for emergency trigger
+      return { label: 'In RLUSD Pool', color: 'text-emerald-400', icon: ShieldCheck }
+    }
     if (lifecycle.released_to_reserve) {
       return { label: 'In Reserve', color: 'text-green-400', icon: ShieldCheck }
     }
@@ -147,16 +215,17 @@ export default function DonorDashboard({ wallet }: Props) {
     return { label: 'Pending Batch', color: 'text-gray-400', icon: AlertCircle }
   }
 
-  const getLifecycleStep = (lifecycle: TrackedDonation['lifecycle']): number => {
-    if (lifecycle.released_to_orgs) return 5
-    if (lifecycle.sent_to_orgs) return 4
-    if (lifecycle.allocated_to_disaster) return 3
+  const getLifecycleStep = (lifecycle: TrackedDonation['lifecycle'], isRlusd: boolean): number => {
+    if (lifecycle.released_to_orgs) return isRlusd ? 3 : 5
+    if (lifecycle.sent_to_orgs) return isRlusd ? 2 : 4
+    if (lifecycle.allocated_to_disaster) return isRlusd ? 1 : 3
+    if (isRlusd) return 0 // RLUSD: in pool, ready
     if (lifecycle.released_to_reserve) return 2
     if (lifecycle.batched) return 1
     return 0
   }
 
-  const LIFECYCLE_STEPS = [
+  const XRP_LIFECYCLE_STEPS = [
     { label: 'Pool', color: '#818CF8' },
     { label: 'Escrow', color: '#FBBF24' },
     { label: 'Reserve', color: '#34D399' },
@@ -165,7 +234,14 @@ export default function DonorDashboard({ wallet }: Props) {
     { label: 'Released', color: '#10B981' },
   ]
 
-  // Remove progress bar since we're showing reserve, not pool batch progress
+  const RLUSD_LIFECYCLE_STEPS = [
+    { label: 'RLUSD Pool', color: '#34D399' },
+    { label: 'Disaster', color: '#F87171' },
+    { label: 'Locked', color: '#C084FC' },
+    { label: 'Released', color: '#10B981' },
+  ]
+
+  const quickAmounts = currency === 'RLUSD' ? [50, 100, 250, 500] : [10, 25, 50, 100]
 
   return (
     <div className="flex min-h-[calc(100vh-72px)]">
@@ -202,9 +278,10 @@ export default function DonorDashboard({ wallet }: Props) {
           {/* Stats Row */}
           <div className="flex justify-center gap-16 mt-12">
             {[
-              { label: 'Your Total', val: `${totalDonated.toFixed(1)} XRP`, icon: <TrendingUp size={14} /> },
+              { label: 'XRP Donated', val: `${totalDonated.toFixed(1)} XRP`, icon: <TrendingUp size={14} /> },
+              ...(totalRlusdDonated > 0 ? [{ label: 'RLUSD Donated', val: `${totalRlusdDonated.toFixed(1)} RLUSD`, icon: <DollarSign size={14} /> }] : []),
               { label: 'Donations', val: String(trackedDonations.length), icon: <Activity size={14} /> },
-              { label: 'Protocol', val: 'Escrow', icon: <ShieldCheck size={14} /> },
+              { label: 'Protocol', val: 'TokenEscrow', icon: <ShieldCheck size={14} /> },
             ].map((stat, i) => (
               <div key={i} className="text-left group cursor-default">
                 <div className="flex items-center gap-2 mb-1">
@@ -224,11 +301,21 @@ export default function DonorDashboard({ wallet }: Props) {
               <h2 className="text-xs font-bold text-white uppercase tracking-[0.3em] mb-1">Transaction Ledger</h2>
               <p className="text-sm text-zinc-600 font-medium italic">Track your contributions from pool to impact</p>
             </div>
-            <div className="flex items-center gap-3">
-              <Database size={14} className="text-zinc-700" />
-              <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">
-                Total: {totalDonated.toFixed(2)} XRP
-              </span>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Database size={14} className="text-zinc-700" />
+                <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">
+                  {totalDonated.toFixed(2)} XRP
+                </span>
+              </div>
+              {totalRlusdDonated > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <DollarSign size={12} className="text-emerald-500/60" />
+                  <span className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest">
+                    {totalRlusdDonated.toFixed(2)} RLUSD
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -246,6 +333,8 @@ export default function DonorDashboard({ wallet }: Props) {
                 const statusBadge = getStatusBadge(d)
                 const Icon = statusBadge.icon
                 const hasDisasters = d.disaster_allocations.length > 0
+                const donCurrency = d.currency || 'XRP'
+                const isRlusd = donCurrency === 'RLUSD'
 
                 return (
                   <motion.div
@@ -253,13 +342,25 @@ export default function DonorDashboard({ wallet }: Props) {
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: idx * 0.05 }}
-                    className="p-5 rounded-[24px] border border-white/[0.03] bg-white/[0.01] group hover:border-white/[0.08] transition-all duration-300"
+                    className={`p-5 rounded-[24px] border bg-white/[0.01] group hover:border-white/[0.08] transition-all duration-300 ${
+                      isRlusd ? 'border-emerald-500/10' : 'border-white/[0.03]'
+                    }`}
                   >
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-6">
                         <div className="flex flex-col">
                           <span className="text-xs font-bold text-zinc-600 uppercase tracking-widest mb-1">Amount</span>
-                          <span className="text-sm font-semibold text-white">{d.amount_xrp} XRP</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-white">{d.amount_xrp} {donCurrency}</span>
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                              isRlusd
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : 'bg-white/[0.05] text-zinc-400 border border-white/10'
+                            }`}>
+                              {isRlusd && <DollarSign size={8} />}
+                              {donCurrency}
+                            </span>
+                          </div>
                         </div>
                         <div className="flex flex-col">
                           <span className="text-xs font-bold text-zinc-600 uppercase tracking-widest mb-1">Status</span>
@@ -293,8 +394,8 @@ export default function DonorDashboard({ wallet }: Props) {
                     {/* Lifecycle Step Tracker */}
                     <div className="mt-4 pt-4 border-t border-white/[0.04]">
                       <div className="flex items-center gap-0">
-                        {LIFECYCLE_STEPS.map((step, si) => {
-                          const currentStep = getLifecycleStep(d.lifecycle)
+                        {(isRlusd ? RLUSD_LIFECYCLE_STEPS : XRP_LIFECYCLE_STEPS).map((step, si) => {
+                          const currentStep = getLifecycleStep(d.lifecycle, isRlusd)
                           const done = si <= currentStep
                           const active = si === currentStep
                           return (
@@ -320,7 +421,7 @@ export default function DonorDashboard({ wallet }: Props) {
                                   {step.label}
                                 </span>
                               </div>
-                              {si < LIFECYCLE_STEPS.length - 1 && (
+                              {si < (isRlusd ? RLUSD_LIFECYCLE_STEPS : XRP_LIFECYCLE_STEPS).length - 1 && (
                                 <div
                                   className="h-[1.5px] flex-1 -mt-3 mx-0.5 rounded-full transition-all duration-500"
                                   style={{
@@ -345,7 +446,7 @@ export default function DonorDashboard({ wallet }: Props) {
                             </span>
                           </div>
                           <p className="text-sm text-zinc-700 italic ml-5">
-                            Your {d.amount_xrp} XRP joined reserve pool with other donors. Below is your proportional share of disasters funded.
+                            Your {d.amount_xrp} {donCurrency} joined the {isRlusd ? 'RLUSD' : 'reserve'} pool with other donors. Below is your proportional share of disasters funded.
                           </p>
                         </div>
                         <div className="space-y-2">
@@ -363,11 +464,11 @@ export default function DonorDashboard({ wallet }: Props) {
                                     </div>
                                   </div>
                                   <div className="text-right">
-                                    <div className="text-sm font-bold text-emerald-400">
-                                      Your Share: {disaster.your_share_xrp.toFixed(3)} XRP
+                                    <div className={`text-sm font-bold ${isRlusd ? 'text-emerald-400' : 'text-emerald-400'}`}>
+                                      Your Share: {disaster.your_share_xrp.toFixed(3)} {donCurrency}
                                     </div>
                                     <div className="text-xs text-zinc-600">
-                                      ({disaster.your_share_pct.toFixed(1)}% of {disaster.total_allocated_xrp.toFixed(2)} XRP)
+                                      ({disaster.your_share_pct.toFixed(1)}% of {disaster.total_allocated_xrp.toFixed(2)} {donCurrency})
                                     </div>
                                   </div>
                                 </div>
@@ -383,8 +484,8 @@ export default function DonorDashboard({ wallet }: Props) {
                                       </div>
                                       <div className="flex items-center gap-2">
                                         <div className="text-right">
-                                          <div className="text-white font-bold">{org.your_share_xrp.toFixed(3)} XRP</div>
-                                          <div className="text-sm text-zinc-700">of {org.total_amount_xrp.toFixed(2)} total</div>
+                                          <div className="text-white font-bold">{org.your_share_xrp.toFixed(3)} {donCurrency}</div>
+                                          <div className="text-sm text-zinc-700">of {org.total_amount_xrp.toFixed(2)} {donCurrency}</div>
                                         </div>
                                         {org.status === 'finished' ? (
                                           <CheckCircle2 size={10} className="text-emerald-500" />
@@ -410,13 +511,75 @@ export default function DonorDashboard({ wallet }: Props) {
       </main>
 
       {/* Donate Sidebar */}
-      <aside className="w-[400px] h-[calc(100vh-72px)] sticky top-[72px] bg-obsidian border-l border-white/[0.03] p-10 flex-col gap-10 hidden lg:flex">
+      <aside className="w-[400px] h-[calc(100vh-72px)] sticky top-[72px] bg-obsidian border-l border-white/[0.03] p-10 flex-col gap-10 hidden lg:flex overflow-y-auto">
         <div className="space-y-1">
           <h2 className="text-xs font-bold text-white uppercase tracking-[0.3em]">Donate</h2>
           <p className="text-xs font-bold text-zinc-600 uppercase tracking-widest">
-            XRPL Escrow Protocol // Pool Settlement
+            {currency === 'RLUSD' ? 'RLUSD Stablecoin // TokenEscrow Protocol' : 'XRPL Escrow Protocol // Pool Settlement'}
           </p>
         </div>
+
+        {/* Currency Toggle */}
+        <div className="flex rounded-2xl border border-white/[0.08] overflow-hidden">
+          <button
+            onClick={() => setCurrency('XRP')}
+            className={`flex-1 py-3 text-sm font-bold uppercase tracking-widest transition-all ${
+              currency === 'XRP'
+                ? 'bg-white text-black'
+                : 'bg-transparent text-zinc-500 hover:text-white'
+            }`}
+          >
+            XRP
+          </button>
+          <button
+            onClick={() => setCurrency('RLUSD')}
+            className={`flex-1 py-3 text-sm font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-1.5 ${
+              currency === 'RLUSD'
+                ? 'bg-emerald-500 text-white'
+                : 'bg-transparent text-zinc-500 hover:text-white'
+            }`}
+          >
+            <DollarSign size={14} />
+            RLUSD
+          </button>
+        </div>
+
+        {/* RLUSD Setup Section */}
+        {currency === 'RLUSD' && (
+          <div className="space-y-3">
+            <div className="p-4 rounded-2xl bg-emerald-500/[0.03] border border-emerald-500/10">
+              <div className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest mb-2">
+                Your RLUSD Balance
+              </div>
+              <div className="text-2xl font-light text-white">
+                {rlusdBalance.toFixed(2)} <span className="text-sm text-zinc-600">RLUSD</span>
+              </div>
+            </div>
+
+            {rlusdBalance === 0 && (
+              <div className="space-y-2">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleSetupTrustline}
+                  disabled={rlusdLoading}
+                  className="w-full py-3 rounded-2xl text-sm font-bold uppercase tracking-widest border border-emerald-500/20 bg-emerald-500/[0.05] text-emerald-400 hover:bg-emerald-500/10 transition-all disabled:opacity-50"
+                >
+                  {rlusdLoading ? 'Processing...' : '1. Setup TrustLine'}
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleGetTestRLUSD}
+                  disabled={rlusdLoading}
+                  className="w-full py-3 rounded-2xl text-sm font-bold uppercase tracking-widest border border-emerald-500/20 bg-emerald-500/[0.05] text-emerald-400 hover:bg-emerald-500/10 transition-all disabled:opacity-50"
+                >
+                  {rlusdLoading ? 'Processing...' : '2. Get Test RLUSD'}
+                </motion.button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex-1 space-y-10">
           {/* Amount Input */}
@@ -431,15 +594,17 @@ export default function DonorDashboard({ wallet }: Props) {
                 step="1"
                 className="relative w-full bg-transparent border-none py-2 text-6xl font-extralight text-white outline-none transition-all placeholder:text-zinc-900 tracking-tighter"
               />
-              <div className="absolute right-6 bottom-6 text-sm font-bold text-zinc-600 uppercase tracking-widest">
-                XRP
+              <div className={`absolute right-6 bottom-6 text-sm font-bold uppercase tracking-widest ${
+                currency === 'RLUSD' ? 'text-emerald-500/60' : 'text-zinc-600'
+              }`}>
+                {currency}
               </div>
             </div>
           </div>
 
           {/* Quick Amount Buttons */}
           <div className="grid grid-cols-2 gap-3">
-            {[10, 25, 50, 100].map((val) => (
+            {quickAmounts.map((val) => (
               <motion.button
                 key={val}
                 whileHover={{ scale: 1.02 }}
@@ -447,11 +612,13 @@ export default function DonorDashboard({ wallet }: Props) {
                 onClick={() => setAmount(String(val))}
                 className={`py-3.5 rounded-2xl text-sm font-bold uppercase tracking-widest border transition-all duration-300 ${
                   amount === String(val)
-                    ? 'bg-white text-black border-white shadow-xl'
+                    ? currency === 'RLUSD'
+                      ? 'bg-emerald-500 text-white border-emerald-500 shadow-xl'
+                      : 'bg-white text-black border-white shadow-xl'
                     : 'border-white/[0.08] bg-white/[0.01] text-zinc-500 hover:border-white/20 hover:text-white'
                 }`}
               >
-                {val} XRP
+                {val} {currency}
               </motion.button>
             ))}
           </div>
@@ -478,17 +645,23 @@ export default function DonorDashboard({ wallet }: Props) {
             whileTap={{ scale: 0.98 }}
             onClick={handleDonate}
             disabled={donating}
-            className="relative overflow-hidden w-full py-4 bg-white text-black font-bold text-[15px] uppercase tracking-[0.2em] rounded-[28px] transition-all duration-300 shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_30px_rgba(255,255,255,0.15)] disabled:opacity-50"
+            className={`relative overflow-hidden w-full py-4 font-bold text-[15px] uppercase tracking-[0.2em] rounded-[28px] transition-all duration-300 disabled:opacity-50 ${
+              currency === 'RLUSD'
+                ? 'bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.2)] hover:shadow-[0_0_30px_rgba(16,185,129,0.3)]'
+                : 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_30px_rgba(255,255,255,0.15)]'
+            }`}
           >
             {donating ? (
               <span className="flex items-center justify-center gap-2">
-                <div className="w-4 h-4 border-2 border-black/20 border-t-black rounded-full animate-spin" />
+                <div className={`w-4 h-4 border-2 rounded-full animate-spin ${
+                  currency === 'RLUSD' ? 'border-white/20 border-t-white' : 'border-black/20 border-t-black'
+                }`} />
                 Signing...
               </span>
             ) : (
               <span className="flex items-center justify-center gap-2">
-                <Zap size={14} />
-                Donate
+                {currency === 'RLUSD' ? <DollarSign size={14} /> : <Zap size={14} />}
+                Donate {currency}
               </span>
             )}
             <div className="absolute inset-0 shimmer opacity-0 hover:opacity-100 transition-opacity pointer-events-none" />
@@ -525,7 +698,10 @@ export default function DonorDashboard({ wallet }: Props) {
           <div>
             <div className="text-xs font-bold text-zinc-600 uppercase tracking-widest mb-1">Protocol</div>
             <p className="text-xs text-zinc-600 leading-relaxed font-medium">
-              Donations batch at {threshold} XRP threshold, then lock in XRPL escrow for secure distribution.
+              {currency === 'RLUSD'
+                ? 'RLUSD donations go directly to the RLUSD pool. On emergency trigger, funds are sent to a disaster wallet and locked via XRPL TokenEscrow for each organization.'
+                : `Donations batch at ${threshold} XRP threshold, then lock in XRPL escrow for secure distribution.`
+              }
             </p>
           </div>
         </div>

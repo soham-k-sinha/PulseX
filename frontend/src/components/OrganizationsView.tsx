@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Building2, Heart, Home, Utensils, BookOpen, Droplets, Shield,
   TrendingUp, Lock, CheckCircle, Database, ExternalLink, ChevronDown,
-  ArrowRight, Calendar, Zap
+  ArrowRight, Calendar, Zap, DollarSign
 } from 'lucide-react'
 import * as api from '../services/api'
 import type { Organization, XRPLStatus, DisasterInfo } from '../types'
@@ -24,6 +24,7 @@ interface OrgEscrowDetail {
   location: string
   severity: number
   amount_xrp: number
+  currency: string
   status: string
   escrow_tx_hash: string
   finish_tx_hash: string | null
@@ -40,8 +41,11 @@ export default function OrganizationsView() {
   const [dropdownOpen, setDropdownOpen] = useState(false)
 
   // Stats for selected org
-  const [totalReceived, setTotalReceived] = useState(0)
-  const [lockedInEscrow, setLockedInEscrow] = useState(0)
+  const [totalReceivedXrp, setTotalReceivedXrp] = useState(0)
+  const [totalReceivedRlusd, setTotalReceivedRlusd] = useState(0)
+  const [lockedXrp, setLockedXrp] = useState(0)
+  const [lockedRlusd, setLockedRlusd] = useState(0)
+  const [poolRlusdBalance, setPoolRlusdBalance] = useState(0)
 
   const loadOrgs = async () => {
     try {
@@ -53,6 +57,7 @@ export default function OrganizationsView() {
       const organizations: Organization[] = orgRes.organizations || []
       setOrgs(organizations)
       setXrplStatus(xrpl)
+      setPoolRlusdBalance(xrpl.accounts?.pool?.balance_rlusd || 0)
 
       // Auto-select first org if none selected
       if (!selectedOrg && organizations.length > 0) {
@@ -72,7 +77,10 @@ export default function OrganizationsView() {
       const disasterList = disasters.disasters || []
 
       const escrowDetails: OrgEscrowDetail[] = []
-      let locked = 0
+      let lXrp = 0
+      let lRlusd = 0
+      let totalXrp = 0
+      let totalRlusd = 0
 
       for (const disaster of disasterList) {
         try {
@@ -82,12 +90,14 @@ export default function OrganizationsView() {
           )
 
           for (const escrow of orgEscrowsForDisaster) {
+            const cur = escrow.currency || 'XRP'
             escrowDetails.push({
               disaster_id: disaster.disaster_id,
               disaster_type: disaster.disaster_type,
               location: disaster.location,
               severity: disaster.severity,
               amount_xrp: escrow.amount_xrp,
+              currency: cur,
               status: escrow.status,
               escrow_tx_hash: escrow.escrow_tx_hash,
               finish_tx_hash: escrow.finish_tx_hash,
@@ -95,8 +105,12 @@ export default function OrganizationsView() {
               finished_at: escrow.finished_at,
             })
 
-            if (escrow.status !== 'finished') {
-              locked += escrow.amount_xrp
+            if (cur === 'RLUSD') {
+              totalRlusd += escrow.amount_xrp
+              if (escrow.status !== 'finished') lRlusd += escrow.amount_xrp
+            } else {
+              totalXrp += escrow.amount_xrp
+              if (escrow.status !== 'finished') lXrp += escrow.amount_xrp
             }
           }
         } catch {
@@ -107,8 +121,10 @@ export default function OrganizationsView() {
       setOrgEscrows(escrowDetails.sort((a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       ))
-      setTotalReceived(org.total_received_xrp || 0)
-      setLockedInEscrow(locked)
+      setTotalReceivedXrp(totalXrp)
+      setTotalReceivedRlusd(totalRlusd)
+      setLockedXrp(lXrp)
+      setLockedRlusd(lRlusd)
     } catch (err) {
       console.error('Failed to load org details:', err)
     }
@@ -261,12 +277,28 @@ export default function OrganizationsView() {
                       Total Received
                     </span>
                   </div>
-                  <div className="flex items-baseline gap-2 mb-2">
-                    <span className="text-5xl font-extralight text-white tracking-tight">
-                      {totalReceived.toFixed(2)}
-                    </span>
-                    <span className="text-lg font-light text-zinc-700 italic">XRP</span>
-                  </div>
+                  {totalReceivedXrp > 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-white tracking-tight">
+                        {totalReceivedXrp.toFixed(2)}
+                      </span>
+                      <span className="text-lg font-light text-zinc-700 italic">XRP</span>
+                    </div>
+                  )}
+                  {totalReceivedRlusd > 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-emerald-400 tracking-tight">
+                        {totalReceivedRlusd.toFixed(2)}
+                      </span>
+                      <span className="text-lg font-light text-zinc-700 italic">RLUSD</span>
+                    </div>
+                  )}
+                  {totalReceivedXrp === 0 && totalReceivedRlusd === 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-white tracking-tight">0.00</span>
+                      <span className="text-lg font-light text-zinc-700 italic">XRP</span>
+                    </div>
+                  )}
                   <p className="text-xs text-zinc-600 italic">All-time funds received</p>
                 </div>
               </motion.div>
@@ -286,12 +318,28 @@ export default function OrganizationsView() {
                       Locked in Escrow
                     </span>
                   </div>
-                  <div className="flex items-baseline gap-2 mb-2">
-                    <span className="text-5xl font-extralight text-yellow-400 tracking-tight">
-                      {lockedInEscrow.toFixed(2)}
-                    </span>
-                    <span className="text-lg font-light text-zinc-700 italic">XRP</span>
-                  </div>
+                  {lockedXrp > 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-yellow-400 tracking-tight">
+                        {lockedXrp.toFixed(2)}
+                      </span>
+                      <span className="text-lg font-light text-zinc-700 italic">XRP</span>
+                    </div>
+                  )}
+                  {lockedRlusd > 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-emerald-400 tracking-tight">
+                        {lockedRlusd.toFixed(2)}
+                      </span>
+                      <span className="text-lg font-light text-zinc-700 italic">RLUSD</span>
+                    </div>
+                  )}
+                  {lockedXrp === 0 && lockedRlusd === 0 && (
+                    <div className="flex items-baseline gap-2 mb-2">
+                      <span className="text-5xl font-extralight text-yellow-400 tracking-tight">0.00</span>
+                      <span className="text-lg font-light text-zinc-700 italic">XRP</span>
+                    </div>
+                  )}
                   <p className="text-xs text-zinc-600 italic">Awaiting automatic release</p>
                 </div>
               </motion.div>
@@ -335,27 +383,38 @@ export default function OrganizationsView() {
               </div>
             </div>
 
-            {/* Reserve Pool */}
+            {/* Pool Status */}
             <div className="p-8 rounded-[32px] border border-emerald-500/10 bg-gradient-to-br from-emerald-500/[0.02] to-transparent">
               <div className="flex items-center gap-2 mb-6">
                 <Database size={14} className="text-emerald-500/60" />
                 <span className="text-xs font-bold text-emerald-600/80 uppercase tracking-widest">
-                  Reserve Pool Status
+                  Available for Allocation
                 </span>
               </div>
-              <div className="mb-3">
+              <div className="mb-4">
                 <div className="text-sm font-bold text-zinc-600 uppercase tracking-widest mb-2">
-                  Available for Allocation
+                  XRP Reserve
                 </div>
                 <div className="flex items-baseline gap-2">
-                  <span className="text-4xl font-extralight text-emerald-400 tracking-tight">
+                  <span className="text-4xl font-extralight text-white tracking-tight">
                     {reserveBalance.toFixed(2)}
                   </span>
                   <span className="text-lg font-light text-zinc-700 italic">XRP</span>
                 </div>
               </div>
+              <div className="mb-3 pt-4 border-t border-white/[0.05]">
+                <div className="text-sm font-bold text-zinc-600 uppercase tracking-widest mb-2">
+                  RLUSD Pool
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-4xl font-extralight text-emerald-400 tracking-tight">
+                    {poolRlusdBalance.toFixed(2)}
+                  </span>
+                  <span className="text-lg font-light text-zinc-700 italic">RLUSD</span>
+                </div>
+              </div>
               <p className="text-xs text-zinc-600 leading-relaxed italic">
-                This is the total amount available in the reserve pool that can be allocated to matching organizations during emergencies.
+                Funds available for emergency allocation to matching organizations.
               </p>
             </div>
           </section>
@@ -394,7 +453,9 @@ export default function OrganizationsView() {
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: idx * 0.05 }}
-                    className="p-6 rounded-[28px] border border-white/[0.05] bg-white/[0.01] hover:border-white/[0.08] transition-all"
+                    className={`p-6 rounded-[28px] border bg-white/[0.01] hover:border-white/[0.08] transition-all ${
+                      escrow.currency === 'RLUSD' ? 'border-emerald-500/10' : 'border-white/[0.05]'
+                    }`}
                   >
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex-1">
@@ -403,6 +464,13 @@ export default function OrganizationsView() {
                           <h4 className="text-base font-semibold text-white capitalize">
                             {escrow.disaster_type} - {escrow.location}
                           </h4>
+                          <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-widest ${
+                            escrow.currency === 'RLUSD'
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                              : 'bg-white/[0.05] text-zinc-400 border border-white/10'
+                          }`}>
+                            {escrow.currency}
+                          </span>
                         </div>
                         <div className="flex items-center gap-3 text-xs font-bold text-zinc-600 uppercase tracking-widest">
                           <span>Severity: {escrow.severity}/10</span>
@@ -411,8 +479,10 @@ export default function OrganizationsView() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-2xl font-light text-white mb-1">
-                          {escrow.amount_xrp.toFixed(3)} XRP
+                        <div className={`text-2xl font-light mb-1 ${
+                          escrow.currency === 'RLUSD' ? 'text-emerald-400' : 'text-white'
+                        }`}>
+                          {escrow.amount_xrp.toFixed(3)} {escrow.currency}
                         </div>
                         <span
                           className={`text-xs font-bold uppercase tracking-widest ${

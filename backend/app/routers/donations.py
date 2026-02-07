@@ -16,7 +16,9 @@ router = APIRouter(prefix="/api/donations", tags=["donations"])
 
 class PrepareRequest(BaseModel):
     donor_address: str
-    amount_xrp: float
+    amount_xrp: float = 0
+    currency: str = "XRP"
+    amount_rlusd: float = 0
 
 
 class SubmitSignedRequest(BaseModel):
@@ -71,11 +73,23 @@ async def prepare_donation(req: PrepareRequest):
     except Exception:
         fee = "12"
 
+    # Build Amount field based on currency
+    if req.currency == "RLUSD":
+        if not settings.RLUSD_ISSUER_ADDRESS:
+            raise HTTPException(status_code=400, detail="RLUSD issuer not configured")
+        tx_amount = {
+            "currency": settings.RLUSD_CURRENCY_HEX,
+            "issuer": settings.RLUSD_ISSUER_ADDRESS,
+            "value": str(req.amount_rlusd),
+        }
+    else:
+        tx_amount = str(amount_drops)
+
     unsigned_tx = {
         "TransactionType": "Payment",
         "Account": req.donor_address,
         "Destination": settings.POOL_WALLET_ADDRESS,
-        "Amount": str(amount_drops),
+        "Amount": tx_amount,
         "Fee": fee,
         "Sequence": sequence,
         "LastLedgerSequence": ledger_index + 20,
@@ -83,7 +97,7 @@ async def prepare_donation(req: PrepareRequest):
             {
                 "Memo": {
                     "MemoType": str_to_hex("donation"),
-                    "MemoData": json_to_hex({"id": donation_id}),
+                    "MemoData": json_to_hex({"id": donation_id, "currency": req.currency}),
                 }
             }
         ],
@@ -93,6 +107,7 @@ async def prepare_donation(req: PrepareRequest):
         "unsigned_tx": unsigned_tx,
         "donation_id": donation_id,
         "pool_address": settings.POOL_WALLET_ADDRESS,
+        "currency": req.currency,
     }
 
 
@@ -109,17 +124,29 @@ async def submit_signed_donation(req: SubmitSignedRequest, db: Session = Depends
     if not tx_hash:
         raise HTTPException(status_code=400, detail="No transaction hash in response")
 
-    amount_drops = int(result.get("tx_json", {}).get("Amount", "0"))
+    tx_amount = result.get("tx_json", {}).get("Amount", "0")
     destination = result.get("tx_json", {}).get("Destination", "")
 
     if destination != settings.POOL_WALLET_ADDRESS:
         raise HTTPException(status_code=400, detail="Payment was not sent to pool wallet")
 
+    # Detect currency from Amount field
+    if isinstance(tx_amount, dict):
+        # RLUSD (IOU) payment — store value * 1_000_000 in amount_drops for consistent math
+        currency = "RLUSD"
+        amount_drops = to_drops(float(tx_amount.get("value", "0")))
+        batch_status = "direct"  # RLUSD stays in pool, distributed via emergency trigger
+    else:
+        currency = "XRP"
+        amount_drops = int(tx_amount)
+        batch_status = "pending"
+
     donation = Donation(
         donor_address=req.donor_address,
         amount_drops=amount_drops,
+        currency=currency,
         payment_tx_hash=tx_hash,
-        batch_status="pending",
+        batch_status=batch_status,
     )
     db.add(donation)
     db.commit()
@@ -138,6 +165,7 @@ async def submit_signed_donation(req: SubmitSignedRequest, db: Session = Depends
         "donation": {
             "id": str(donation.id),
             "amount_xrp": from_drops(donation.amount_drops),
+            "currency": donation.currency,
             "batch_status": donation.batch_status,
         },
         "pool_status": {
@@ -172,8 +200,13 @@ async def confirm_donation(req: ConfirmRequest, db: Session = Depends(get_db)):
 
     amount = tx_result.get("Amount", "0")
     if isinstance(amount, dict):
-        raise HTTPException(status_code=400, detail="Only XRP payments supported")
-    amount_drops = int(amount)
+        currency = "RLUSD"
+        amount_drops = to_drops(float(amount.get("value", "0")))
+        batch_status = "direct"  # RLUSD stays in pool, distributed via emergency trigger
+    else:
+        currency = "XRP"
+        amount_drops = int(amount)
+        batch_status = "pending"
 
     destination = tx_result.get("Destination", "")
     if destination != settings.POOL_WALLET_ADDRESS:
@@ -182,8 +215,9 @@ async def confirm_donation(req: ConfirmRequest, db: Session = Depends(get_db)):
     donation = Donation(
         donor_address=req.donor_address,
         amount_drops=amount_drops,
+        currency=currency,
         payment_tx_hash=req.tx_hash,
-        batch_status="pending",
+        batch_status=batch_status,
     )
     db.add(donation)
     db.commit()
@@ -226,6 +260,7 @@ async def get_donor_status(address: str, db: Session = Depends(get_db)):
             {
                 "id": str(d.id),
                 "amount_xrp": from_drops(d.amount_drops),
+                "currency": getattr(d, 'currency', 'XRP'),
                 "payment_tx_hash": d.payment_tx_hash,
                 "batch_id": d.batch_id,
                 "batch_status": d.batch_status,

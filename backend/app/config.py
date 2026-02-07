@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     FRONTEND_URL: str = "http://localhost:5173"
 
+    RLUSD_ISSUER_ADDRESS: str = ""
+    RLUSD_ISSUER_SECRET: str = ""
+    RLUSD_CURRENCY_HEX: str = "524C555344000000000000000000000000000000"
+
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 

@@ -10,6 +10,8 @@ interface Allocation {
   org_id: number
   org_name: string
   amount_xrp?: number
+  amount_rlusd?: number
+  currency?: string
   percentage?: number
   escrow_tx_hash?: string
   error?: string
@@ -23,7 +25,9 @@ interface Props {
     disaster_id: string
     disaster_account: string
     total_allocated_xrp: number
+    total_allocated_rlusd?: number
     allocations: Allocation[]
+    rlusd_allocations?: Allocation[]
   }
   error?: string
 }
@@ -39,22 +43,22 @@ const STEP_MAP: Record<FlowStatus, number> = {
 const STATUS_CONFIG: Record<FlowStatus, { label: string; sub: string; color: string }> = {
   idle: {
     label: 'Initializing Emergency Protocol',
-    sub: 'Reading reserve balance and calculating allocations...',
+    sub: 'Reading balances and calculating allocations...',
     color: 'text-zinc-400',
   },
   funding: {
     label: 'Funding Disaster Wallet',
-    sub: 'Transferring XRP from reserve to dedicated disaster response wallet...',
+    sub: 'Transferring funds to dedicated disaster response wallet...',
     color: 'text-amber-400',
   },
   creating: {
     label: 'Creating Escrow Locks',
-    sub: 'Locking XRP in XRPL escrow for each organization with time-based release...',
+    sub: 'Locking funds in XRPL TokenEscrow for each organization...',
     color: 'text-blue-400',
   },
   complete: {
     label: 'Allocation Complete',
-    sub: 'All funds locked in escrow. Organizations will receive XRP automatically.',
+    sub: 'All funds locked in escrow. Organizations will receive funds automatically.',
     color: 'text-emerald-400',
   },
   error: {
@@ -177,66 +181,103 @@ export default function EmergencyFlowModal({ isOpen, onClose, status, result, er
                   className="px-10 pb-10"
                 >
                   {/* Summary */}
-                  <div className="flex items-center gap-8 mb-6 p-5 rounded-2xl bg-emerald-500/[0.04] border border-emerald-500/[0.1]">
-                    <div>
-                      <div className="text-[9px] font-bold text-emerald-600/80 uppercase tracking-[0.2em] mb-1">Total Allocated</div>
-                      <div className="text-2xl font-light text-emerald-400">{result.total_allocated_xrp.toFixed(2)} XRP</div>
-                    </div>
-                    <div className="w-px h-10 bg-white/[0.05]" />
-                    <div>
-                      <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-[0.2em] mb-1">Disaster ID</div>
-                      <div className="text-sm text-white/60 font-mono">{result.disaster_id}</div>
-                    </div>
-                    <div className="w-px h-10 bg-white/[0.05]" />
-                    <div>
-                      <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-[0.2em] mb-1">Organizations</div>
-                      <div className="text-sm text-white/60">{result.allocations.filter(a => !a.error).length} funded</div>
-                    </div>
-                  </div>
+                  {(() => {
+                    const hasXrp = result.total_allocated_xrp > 0
+                    const hasRlusd = (result.total_allocated_rlusd || 0) > 0
+                    const xrpOrgCount = result.allocations.filter(a => !a.error).length
+                    const rlusdOrgCount = (result.rlusd_allocations || []).filter(a => !a.error).length
+                    const totalOrgCount = Math.max(xrpOrgCount, rlusdOrgCount)
+                    const allAllocations: Allocation[] = [
+                      ...result.allocations.map(a => ({ ...a, currency: 'XRP' })),
+                      ...(result.rlusd_allocations || []).map(a => ({ ...a, currency: 'RLUSD' })),
+                    ]
 
-                  {/* Allocation breakdown */}
-                  <div className="space-y-2">
-                    {result.allocations.map((alloc, idx) => (
-                      <motion.div
-                        key={idx}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: 0.1 * idx }}
-                        className="flex items-center justify-between p-4 rounded-2xl bg-white/[0.02] border border-white/[0.04] group hover:border-white/[0.08] transition-all"
-                      >
-                        <div className="flex items-center gap-4">
-                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm font-bold ${alloc.error ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-                            {alloc.error ? '!' : '\u2713'}
-                          </div>
+                    return (
+                      <>
+                        <div className="flex items-center gap-6 mb-6 p-5 rounded-2xl bg-emerald-500/[0.04] border border-emerald-500/[0.1] flex-wrap">
+                          {hasXrp && (
+                            <div>
+                              <div className="text-[9px] font-bold text-emerald-600/80 uppercase tracking-[0.2em] mb-1">XRP Allocated</div>
+                              <div className="text-2xl font-light text-emerald-400">{result.total_allocated_xrp.toFixed(2)} XRP</div>
+                            </div>
+                          )}
+                          {hasXrp && hasRlusd && <div className="w-px h-10 bg-white/[0.05]" />}
+                          {hasRlusd && (
+                            <div>
+                              <div className="text-[9px] font-bold text-emerald-600/80 uppercase tracking-[0.2em] mb-1">RLUSD Allocated</div>
+                              <div className="text-2xl font-light text-emerald-400">{(result.total_allocated_rlusd || 0).toFixed(2)} RLUSD</div>
+                            </div>
+                          )}
+                          <div className="w-px h-10 bg-white/[0.05]" />
                           <div>
-                            <div className="text-sm font-medium text-white">{alloc.org_name}</div>
-                            {alloc.escrow_tx_hash && (
-                              <a
-                                href={`${EXPLORER}/transactions/${alloc.escrow_tx_hash}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center gap-1 text-[10px] text-zinc-600 hover:text-emerald-400 transition-colors mt-0.5"
-                              >
-                                <ExternalLink size={8} />
-                                {alloc.escrow_tx_hash.slice(0, 16)}...
-                              </a>
-                            )}
-                            {alloc.error && (
-                              <span className="text-[10px] text-red-400/80">{alloc.error}</span>
-                            )}
+                            <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-[0.2em] mb-1">Disaster ID</div>
+                            <div className="text-sm text-white/60 font-mono">{result.disaster_id}</div>
+                          </div>
+                          <div className="w-px h-10 bg-white/[0.05]" />
+                          <div>
+                            <div className="text-[9px] font-bold text-zinc-600 uppercase tracking-[0.2em] mb-1">Organizations</div>
+                            <div className="text-sm text-white/60">{totalOrgCount} funded</div>
                           </div>
                         </div>
-                        <div className="text-right">
-                          {alloc.amount_xrp && (
-                            <div className="text-base font-semibold text-white">{alloc.amount_xrp.toFixed(3)} XRP</div>
-                          )}
-                          {alloc.percentage && (
-                            <div className="text-[10px] text-zinc-600">{alloc.percentage.toFixed(1)}%</div>
-                          )}
+
+                        {/* Allocation breakdown */}
+                        <div className="space-y-2">
+                          {allAllocations.map((alloc, idx) => {
+                            const isRlusd = alloc.currency === 'RLUSD'
+                            const displayAmount = isRlusd ? alloc.amount_rlusd : alloc.amount_xrp
+                            const displayCurrency = isRlusd ? 'RLUSD' : 'XRP'
+                            return (
+                              <motion.div
+                                key={`${alloc.currency}-${idx}`}
+                                initial={{ opacity: 0, x: -20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                transition={{ delay: 0.1 * idx }}
+                                className={`flex items-center justify-between p-4 rounded-2xl bg-white/[0.02] border group hover:border-white/[0.08] transition-all ${
+                                  isRlusd ? 'border-emerald-500/10' : 'border-white/[0.04]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-4">
+                                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm font-bold ${alloc.error ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                                    {alloc.error ? '!' : '\u2713'}
+                                  </div>
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-sm font-medium text-white">{alloc.org_name}</span>
+                                      <span className={`px-1.5 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-widest ${
+                                        isRlusd ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-white/[0.05] text-zinc-400 border border-white/10'
+                                      }`}>{displayCurrency}</span>
+                                    </div>
+                                    {alloc.escrow_tx_hash && (
+                                      <a
+                                        href={`${EXPLORER}/transactions/${alloc.escrow_tx_hash}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="flex items-center gap-1 text-[10px] text-zinc-600 hover:text-emerald-400 transition-colors mt-0.5"
+                                      >
+                                        <ExternalLink size={8} />
+                                        {alloc.escrow_tx_hash.slice(0, 16)}...
+                                      </a>
+                                    )}
+                                    {alloc.error && (
+                                      <span className="text-[10px] text-red-400/80">{alloc.error}</span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  {displayAmount != null && (
+                                    <div className="text-base font-semibold text-white">{displayAmount.toFixed(3)} {displayCurrency}</div>
+                                  )}
+                                  {alloc.percentage != null && (
+                                    <div className="text-[10px] text-zinc-600">{alloc.percentage.toFixed(1)}%</div>
+                                  )}
+                                </div>
+                              </motion.div>
+                            )
+                          })}
                         </div>
-                      </motion.div>
-                    ))}
-                  </div>
+                      </>
+                    )
+                  })()}
 
                   {/* Close button */}
                   <motion.button

@@ -52,6 +52,7 @@ export interface OrgEscrowInfo {
   org_id: number
   org_name: string
   amount_xrp: number
+  currency?: string
   status: string
   escrow_tx_hash: string
   finish_tx_hash: string | null
@@ -66,6 +67,7 @@ export interface DisasterInfo {
   location: string
   severity: number
   total_allocated_xrp: number
+  total_allocated_rlusd?: number
   status: string
   wallet_address?: string
   org_escrows?: OrgEscrowInfo[]

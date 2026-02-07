@@ -3,8 +3,9 @@ from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.asyncio.transaction import submit_and_wait, autofill
 from xrpl.asyncio.account import get_balance
 from xrpl.asyncio.ledger import get_fee
-from xrpl.models.requests import AccountInfo, AccountObjects, Tx, ServerInfo, SubmitOnly
+from xrpl.models.requests import AccountInfo, AccountLines, AccountObjects, Tx, ServerInfo, SubmitOnly
 from xrpl.models.transactions import Payment, EscrowCreate, EscrowFinish
+from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.wallet import Wallet
 from xrpl.utils import xrp_to_drops
 from app.config import settings
@@ -17,6 +18,9 @@ class XRPLClient:
         self.url = settings.XRPL_NODE_URL
         self.pool_wallet = Wallet.from_seed(settings.POOL_WALLET_SECRET)
         self.reserve_wallet = Wallet.from_seed(settings.RESERVE_WALLET_SECRET)
+        self.rlusd_issuer_wallet = None
+        if settings.RLUSD_ISSUER_SECRET:
+            self.rlusd_issuer_wallet = Wallet.from_seed(settings.RLUSD_ISSUER_SECRET)
 
     async def get_client(self) -> AsyncWebsocketClient:
         client = AsyncWebsocketClient(self.url)
@@ -79,13 +83,15 @@ class XRPLClient:
             response = await submit_and_wait(tx, client, wallet)
             return response.result
 
-    async def create_escrow(self, wallet: Wallet, destination: str, amount_drops: int,
+    async def create_escrow(self, wallet: Wallet, destination: str, amount_drops,
                             finish_after: int, cancel_after: int = None, memos: list = None) -> dict:
         async with AsyncWebsocketClient(self.url) as client:
+            # amount_drops can be int/str (XRP) or IssuedCurrencyAmount (RLUSD via TokenEscrow)
+            amount = amount_drops if isinstance(amount_drops, IssuedCurrencyAmount) else str(amount_drops)
             kwargs = {
                 "account": wallet.address,
                 "destination": destination,
-                "amount": str(amount_drops),
+                "amount": amount,
                 "finish_after": finish_after,
             }
             if cancel_after:
@@ -129,10 +135,13 @@ class XRPLClient:
 
             for i, params in enumerate(escrow_params):
                 try:
+                    # amount can be int/str (XRP) or IssuedCurrencyAmount (RLUSD)
+                    raw_amount = params["amount_drops"]
+                    amount = raw_amount if isinstance(raw_amount, IssuedCurrencyAmount) else str(raw_amount)
                     kwargs = {
                         "account": wallet.address,
                         "destination": params["destination"],
-                        "amount": str(params["amount_drops"]),
+                        "amount": amount,
                         "finish_after": params["finish_after"],
                         "sequence": base_sequence + i,
                     }
@@ -172,6 +181,70 @@ class XRPLClient:
                     results.append(response.result)
                 except Exception as e:
                     logger.error(f"Batch escrow finish #{i} failed: {e}")
+                    results.append({"error": str(e), "index": i})
+        return results
+
+    async def get_rlusd_balance(self, address: str) -> float:
+        """Get RLUSD (IOU) balance for an address using AccountLines."""
+        async with AsyncWebsocketClient(self.url) as client:
+            response = await client.request(
+                AccountLines(account=address, peer=settings.RLUSD_ISSUER_ADDRESS)
+            )
+            if response.is_successful():
+                for line in response.result.get("lines", []):
+                    if line.get("currency") == settings.RLUSD_CURRENCY_HEX:
+                        return float(line.get("balance", "0"))
+            return 0.0
+
+    async def submit_rlusd_payment(self, wallet: Wallet, destination: str, amount_value: str, memos: list = None) -> dict:
+        """Send an RLUSD (IOU) Payment."""
+        async with AsyncWebsocketClient(self.url) as client:
+            amount = IssuedCurrencyAmount(
+                currency=settings.RLUSD_CURRENCY_HEX,
+                issuer=settings.RLUSD_ISSUER_ADDRESS,
+                value=amount_value,
+            )
+            kwargs = {
+                "account": wallet.address,
+                "destination": destination,
+                "amount": amount,
+            }
+            if memos:
+                kwargs["memos"] = memos
+            tx = Payment(**kwargs)
+            response = await submit_and_wait(tx, client, wallet)
+            return response.result
+
+    async def submit_rlusd_payments_batch(self, wallet: Wallet, payment_params: list[dict]) -> list[dict]:
+        """Send multiple RLUSD payments using a single WebSocket connection with manual sequence numbering."""
+        results = []
+        async with AsyncWebsocketClient(self.url) as client:
+            acct_info = await client.request(AccountInfo(account=wallet.address, ledger_index="current"))
+            if not acct_info.is_successful():
+                raise Exception(f"Failed to get account info: {acct_info.result}")
+            base_sequence = acct_info.result["account_data"]["Sequence"]
+
+            for i, params in enumerate(payment_params):
+                try:
+                    amount = IssuedCurrencyAmount(
+                        currency=settings.RLUSD_CURRENCY_HEX,
+                        issuer=settings.RLUSD_ISSUER_ADDRESS,
+                        value=params["amount_value"],
+                    )
+                    kwargs = {
+                        "account": wallet.address,
+                        "destination": params["destination"],
+                        "amount": amount,
+                        "sequence": base_sequence + i,
+                    }
+                    if params.get("memos"):
+                        kwargs["memos"] = params["memos"]
+                    tx = Payment(**kwargs)
+                    tx_filled = await autofill(tx, client)
+                    response = await submit_and_wait(tx_filled, client, wallet, autofill=False)
+                    results.append(response.result)
+                except Exception as e:
+                    logger.error(f"Batch RLUSD payment #{i} failed: {e}")
                     results.append({"error": str(e), "index": i})
         return results
 

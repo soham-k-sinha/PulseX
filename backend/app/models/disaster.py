@@ -13,6 +13,7 @@ class Disaster(Base):
     location = Column(String(100), nullable=False)
     severity = Column(Integer, nullable=False)
     total_allocated_drops = Column(BigInteger, nullable=False)
+    total_rlusd_allocated_drops = Column(BigInteger, default=0, nullable=False)
     status = Column(String(20), default="active")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime(timezone=True), nullable=True)

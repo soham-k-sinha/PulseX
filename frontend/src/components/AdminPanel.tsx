@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   ShieldAlert, Building2, ArrowRight, Database,
-  Terminal, Activity, MapPin, AlertCircle, Zap, ExternalLink, ChevronDown, ChevronUp
+  Terminal, Activity, MapPin, AlertCircle, Zap, ExternalLink, ChevronDown, ChevronUp, DollarSign
 } from 'lucide-react'
 import * as api from '../services/api'
 import type { DisasterInfo, XRPLStatus, Organization } from '../types'
@@ -15,9 +15,11 @@ interface DisasterDetail extends DisasterInfo {
     org_id: number
     org_name: string
     amount_xrp: number
+    currency?: string
     status: string
     escrow_tx_hash: string
     finish_tx_hash: string | null
+    finished_at: string | null
   }>
 }
 
@@ -70,9 +72,16 @@ function DisasterAllocationCard({ disaster, index }: { disaster: DisasterInfo; i
           </div>
         </div>
         <div className="text-right">
-          <div className="text-2xl font-extralight text-white tracking-tight mb-1">
-            {disaster.total_allocated_xrp.toFixed(2)} XRP
-          </div>
+          {disaster.total_allocated_xrp > 0 && (
+            <div className="text-2xl font-extralight text-white tracking-tight mb-1">
+              {disaster.total_allocated_xrp.toFixed(2)} XRP
+            </div>
+          )}
+          {(disaster.total_allocated_rlusd || 0) > 0 && (
+            <div className="text-2xl font-extralight text-emerald-400 tracking-tight mb-1">
+              {(disaster.total_allocated_rlusd || 0).toFixed(2)} RLUSD
+            </div>
+          )}
           <div className="text-xs font-bold text-zinc-600 uppercase tracking-widest">
             From Reserve Pool
           </div>
@@ -114,7 +123,7 @@ function DisasterAllocationCard({ disaster, index }: { disaster: DisasterInfo; i
               <div className="flex items-center gap-2 mb-4">
                 <ArrowRight size={14} className="text-emerald-500/60" />
                 <span className="text-xs font-bold text-zinc-600 uppercase tracking-widest">
-                  Each XRP Allocation
+                  Escrow Allocations
                 </span>
               </div>
 
@@ -196,9 +205,9 @@ function DisasterAllocationCard({ disaster, index }: { disaster: DisasterInfo; i
                             </div>
                           </div>
                         </div>
-                        <div className="text-right">
+        <div className="text-right">
                           <div className="text-lg font-semibold text-white mb-0.5">
-                            {escrow.amount_xrp.toFixed(3)} XRP
+                            {escrow.amount_xrp.toFixed(3)} {(escrow as any).currency || 'XRP'}
                           </div>
                           <div
                             className={`text-xs font-bold uppercase tracking-widest ${
@@ -238,11 +247,15 @@ export default function AdminPanel() {
   const [flowResult, setFlowResult] = useState<any>(null)
   const [flowError, setFlowError] = useState('')
 
+  // RLUSD
+  const [poolRlusdBalance, setPoolRlusdBalance] = useState(0)
+
   // Form
   const [disasterType, setDisasterType] = useState('earthquake')
   const [location, setLocation] = useState('')
   const [severity, setSeverity] = useState(7)
   const [causes, setCauses] = useState<string[]>(['health', 'shelter', 'food'])
+  const [triggerCurrency, setTriggerCurrency] = useState<'XRP' | 'RLUSD'>('XRP')
 
   const loadData = async () => {
     try {
@@ -252,6 +265,7 @@ export default function AdminPanel() {
       ])
       setXrplStatus(xrpl)
       setDisasters(dis.disasters || [])
+      setPoolRlusdBalance(xrpl.accounts?.pool?.balance_rlusd || 0)
     } catch {
       // silent
     }
@@ -299,14 +313,23 @@ export default function AdminPanel() {
         location,
         severity,
         affected_causes: causes,
+        currency: triggerCurrency,
       })
 
       clearTimeout(timer1)
       clearTimeout(timer2)
       setFlowResult(result)
       setFlowStatus('complete')
+      const parts: string[] = []
+      if (result.total_allocated_xrp > 0) {
+        parts.push(`${result.total_allocated_xrp.toFixed(2)} XRP`)
+      }
+      if (result.total_allocated_rlusd > 0) {
+        parts.push(`${result.total_allocated_rlusd.toFixed(2)} RLUSD`)
+      }
+      const orgCount = Math.max(result.allocations?.length || 0, result.rlusd_allocations?.length || 0)
       setMessage(
-        `Emergency allocated! ${result.total_allocated_xrp} XRP to ${result.allocations?.length || 0} orgs`
+        `Emergency allocated! ${parts.join(' + ') || '0'} to ${orgCount} orgs`
       )
       setLocation('')
       loadData()
@@ -421,6 +444,31 @@ export default function AdminPanel() {
 
               <div>
                 <label className="text-xs font-bold text-zinc-600 uppercase tracking-widest block mb-2">
+                  Currency to Allocate
+                </label>
+                <div className="flex gap-2">
+                  {(['XRP', 'RLUSD'] as const).map((c) => (
+                    <motion.button
+                      key={c}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => setTriggerCurrency(c)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest border transition-all duration-300 ${
+                        triggerCurrency === c
+                          ? c === 'RLUSD'
+                            ? 'bg-emerald-500 text-white border-emerald-500'
+                            : 'bg-white text-black border-white'
+                          : 'border-white/[0.08] text-zinc-500 hover:text-white hover:border-white/20'
+                      }`}
+                    >
+                      {c}
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-600 uppercase tracking-widest block mb-2">
                   Affected Causes
                 </label>
                 <div className="flex gap-2 flex-wrap">
@@ -475,7 +523,7 @@ export default function AdminPanel() {
           >
             <h1 className="text-xs font-bold text-zinc-600 uppercase tracking-[0.4em] mb-6">Account Balances</h1>
 
-            {/* Pool Balance */}
+            {/* Pool Balance — XRP */}
             <div className="mb-10">
               <div className="flex items-center gap-2 mb-2">
                 <Database size={14} className="text-zinc-700" />
@@ -502,7 +550,34 @@ export default function AdminPanel() {
               </a>
             </div>
 
-            {/* Reserve Balance */}
+            {/* Pool Balance — RLUSD */}
+            <div className="mb-10 pt-8 border-t border-white/[0.05]">
+              <div className="flex items-center gap-2 mb-2">
+                <DollarSign size={14} className="text-emerald-500/60" />
+                <span className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest">RLUSD Wallet</span>
+              </div>
+              <div className="flex items-baseline gap-3 mb-2">
+                <motion.span
+                  key={poolRlusdBalance}
+                  initial={{ opacity: 0.5 }}
+                  animate={{ opacity: 1 }}
+                  className="text-6xl md:text-7xl font-extralight text-emerald-400 tracking-ultra-tight"
+                >
+                  {poolRlusdBalance.toFixed(2)}
+                </motion.span>
+                <span className="text-xl font-light text-zinc-700 italic">RLUSD</span>
+              </div>
+              <a
+                href={`${EXPLORER}/accounts/${xrplStatus?.accounts?.pool?.address}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-bold text-emerald-500/50 uppercase tracking-widest hover:text-emerald-400 transition-colors"
+              >
+                View on Explorer
+              </a>
+            </div>
+
+            {/* Reserve Balance — XRP */}
             <div className="pt-8 border-t border-white/[0.05]">
               <div className="flex items-center gap-2 mb-2">
                 <Terminal size={14} className="text-zinc-700" />
@@ -513,7 +588,7 @@ export default function AdminPanel() {
                   key={reserveBalance}
                   initial={{ opacity: 0.5 }}
                   animate={{ opacity: 1 }}
-                  className="text-6xl md:text-7xl font-extralight text-emerald-400 tracking-ultra-tight"
+                  className="text-6xl md:text-7xl font-extralight text-white tracking-ultra-tight"
                 >
                   {reserveBalance?.toFixed(2) || '...'}
                 </motion.span>
@@ -523,7 +598,7 @@ export default function AdminPanel() {
                 href={`${EXPLORER}/accounts/${xrplStatus?.accounts?.reserve?.address}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs font-bold text-emerald-500/50 uppercase tracking-widest hover:text-emerald-400 transition-colors"
+                className="text-xs font-bold text-zinc-600 uppercase tracking-widest hover:text-white transition-colors"
               >
                 View on Explorer
               </a>
@@ -539,7 +614,7 @@ export default function AdminPanel() {
             <h3 className="text-xs font-bold text-white uppercase tracking-[0.3em] flex items-center gap-2 mb-1">
               <AlertCircle size={16} /> Emergency Allocations
             </h3>
-            <p className="text-sm text-zinc-600 font-medium italic">Track every XRP from reserve to organization</p>
+            <p className="text-sm text-zinc-600 font-medium italic">Track every allocation from reserve to organization</p>
           </div>
           <span className="text-xs font-bold text-zinc-600 uppercase tracking-widest">
             {disasters.length} Events

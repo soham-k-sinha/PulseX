@@ -47,7 +47,7 @@ export default function LandingHero({ onConnect }: Props) {
         >
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 pulse-glow" />
           <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.25em]">
-            Powered by XRPL Escrow Protocol
+            Powered by XRPL and RLUSD Escrow Protocol
           </span>
         </motion.div>
 
@@ -58,7 +58,7 @@ export default function LandingHero({ onConnect }: Props) {
           transition={{ duration: 1, delay: 0.15 }}
           className="text-6xl md:text-8xl font-extralight tracking-tight text-center mb-5"
         >
-          <span className="text-silk">PulseX</span>
+          <span className="text-silk">Pulse X</span>
         </motion.h1>
 
         <motion.p
@@ -67,7 +67,7 @@ export default function LandingHero({ onConnect }: Props) {
           transition={{ duration: 0.8, delay: 0.3 }}
           className="text-lg md:text-xl font-light text-zinc-500 text-center max-w-xl mb-4 leading-relaxed"
         >
-          Transparent emergency relief on the XRP Ledger
+          Transparent emergency relief on the XRP and RLUSD Ledger
         </motion.p>
 
         <motion.p
@@ -76,7 +76,7 @@ export default function LandingHero({ onConnect }: Props) {
           transition={{ duration: 0.8, delay: 0.5 }}
           className="text-sm text-zinc-600 text-center max-w-lg mb-14 leading-relaxed"
         >
-          Every donation is traceable on-chain. XRPL escrow ensures funds reach
+          Every donation is traceable on-chain. XRPL and RLUSD escrow ensures funds reach
           relief organizations — trustlessly, automatically, verifiably.
         </motion.p>
 
@@ -108,19 +108,19 @@ export default function LandingHero({ onConnect }: Props) {
             {
               icon: Lock,
               title: 'Trustless Escrow',
-              desc: 'XRPL native escrow locks funds with time-based conditions. No intermediary can redirect donations.',
+              desc: 'XRPL and RLUSD native escrow locks funds with time-based conditions. No intermediary can redirect donations.',
               accent: '#FBBF24',
             },
             {
               icon: Eye,
               title: 'Fully Traceable',
-              desc: 'Every XRP tracked from donor to organization. Verify any transaction on the XRPL Explorer.',
+              desc: 'Every XRP and RLUSD tracked from donor to organization. Verify any transaction on the XRPL Explorer.',
               accent: '#34D399',
             },
             {
               icon: Zap,
               title: 'Batched Efficiency',
-              desc: 'Donations intelligently batched to minimize fees. More of your XRP goes directly to relief.',
+              desc: 'Donations intelligently batched to minimize fees. More of your XRP and RLUSD goes directly to relief.',
               accent: '#818CF8',
             },
           ].map((f, i) => (

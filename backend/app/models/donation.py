@@ -13,5 +13,6 @@ class Donation(Base):
     amount_drops = Column(BigInteger, nullable=False)
     payment_tx_hash = Column(String(128), unique=True, nullable=False)
     batch_id = Column(String(64), nullable=True)
+    currency = Column(String(10), default="XRP", nullable=False)
     batch_status = Column(String(20), default="pending", index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
